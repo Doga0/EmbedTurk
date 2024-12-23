@@ -1,25 +1,15 @@
 from selenium import webdriver
 from bs4 import BeautifulSoup
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
 import time
 import numpy as np
 import csv
 
 driver = webdriver.Chrome()
 
-#URL = 'https://www.trendyol.com/sr/?fl=encoksatanurunler'
-URL = 'https://www.trendyol.com/sr?wc=82%2C104024%2C145704&pd=30'
-driver.get(URL)
+URL = 'https://www.trendyol.com/erkek-giyim-x-g2-c82'
 
 def get_content(url):
     driver.get(url)
-
-    """ WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-    time.sleep(2) """
 
     html = driver.page_source
     soup = BeautifulSoup(html, 'html.parser')
@@ -29,7 +19,7 @@ def get_page_no(start, end, url):
     page_nums = []
 
     for i in range(start, end+1):
-        page_nums.append(url + "&pi=" + str(i))
+        page_nums.append(url + "?&pi=" + str(i))
 
     return page_nums
 
@@ -67,10 +57,6 @@ def get_comments(url):
     
     return soup 
 
-#163
-nos = get_page_no(196, 206, URL)
-products , num = get_products(nos)
-
 def get_pr_features(products):
 
     features = [
@@ -78,7 +64,7 @@ def get_pr_features(products):
             "price", "rating", "info", "comments"
         ] 
 
-    with open("dataset.csv", "a", encoding="utf-8") as file:
+    with open("dataset2.csv", "a", encoding="utf-8") as file:
         csv_writer = csv.writer(file)
         csv_writer.writerow(features)
 
@@ -99,7 +85,7 @@ def get_pr_features(products):
                 h1_tag = html.find("h1", {"class": "pr-new-br"})
                 pr_name = h1_tag.find("span").text
 
-                if pr_name==pr_brand:
+                if pr_name == pr_brand:
                     spans = h1_tag.find_all("span")
                     pr_name = spans[1].text
             except:
@@ -118,8 +104,13 @@ def get_pr_features(products):
                 price = np.nan
 
             try:
-                star = html.find("div", {"class": "product-rating-score"}).div.text
-            except:
+                rating_div = html.find("div", {"class": "product-rating-score"})
+
+                if rating_div:
+                    star = rating_div.find("div", {"class": "value"}).text.strip()
+                else:
+                    star = np.nan  
+            except AttributeError:
                 star = np.nan
 
             try:
@@ -127,8 +118,8 @@ def get_pr_features(products):
                 product_desc = ""
                 info = html.find_all("ul", {"class":"detail-desc-list"})
                 desc = html.find_all("div", {"class":"product-desc-content"})
-                detail_items = html.find_all("li", {"class": "detail-attr-item"})
-
+                detail_items = html.find_all("ul", {"class": "detail-attr-container"})
+                
                 list_items = info[0].find_all('li')
                 if len(info) >= 1 and len(list_items) > 6: 
                     product_desc = " ".join([part.text.strip() for part in list_items[7:]])
@@ -137,14 +128,12 @@ def get_pr_features(products):
                     product_desc = " ".join([part.text.strip() for part in desc if part.text.strip()])
 
                 elif len(detail_items) != 0:
-                    for item in detail_items:
-                        key = item.find("span", {"class":"attr-key-name-w"}).text
-                        value = item.find("span", {"class":"attr-value-name-w"}).text
-
-                        key = key.strip()
-                        value = value.strip()
-
+                    for item in detail_items[0].find_all("li"):
+                        key = item.find("span", {"class":"attr-key-name-w"}).text.strip()
+                        value = item.find("span", {"class":"attr-value-name-w"}).text.strip()
+            
                         pr_details[key] = value
+        
                     product_desc = pr_details
 
                 elif len(detail_items) == 0:
@@ -152,20 +141,28 @@ def get_pr_features(products):
 
             except:
                 product_desc = np.nan
-
+            comments_arr = []
             try:
-                pr_href0 = pr.split('?')[0]
-                pr_href1 = pr.split('?')[1]
-                com_link = f"{pr_href0}/yorumlar?{pr_href1}"
-                comments = get_comments(com_link)
+                if '?' in pr:
+                    pr_href0 = pr.split('?')[0]  
+                    pr_href1 = pr.split('?')[1]  
+                else:
+                    pr_href0 = pr  
+                    pr_href1 = ''
 
-                comments_arr = []
+                com_link = f"{pr_href0}/yorumlar?{pr_href1}"
+                
+                if com_link:
+                    comments = get_comments(com_link)
+                else: 
+                    print("Comments link not found.")
+                
                 for com in comments.find_all("div", {"class":"comment"}):
                     c = com.find("div", {"class": "comment-text"}).p.text
                     comments_arr.append(c.strip())
 
-            except:
-                comments_arr = np.nan 
+            except Exception as e:
+                print(f"Error occurred: {e}") 
 
             row = [
                 pr_brand, pr_name, category,
@@ -174,6 +171,13 @@ def get_pr_features(products):
 
             csv_writer.writerow(row)
             
-get_pr_features(products)
 
-driver.quit()
+
+if __name__=="__main__":
+
+    nos = get_page_no(132, 200, URL) 
+    products , num = get_products(nos)
+    get_pr_features(products)
+    
+    driver.quit()
+    
