@@ -6,7 +6,7 @@ import csv
 
 driver = webdriver.Chrome()
 
-URL = 'https://www.trendyol.com/erkek-giyim-x-g2-c82'
+URL = 'https://www.trendyol.com/erkek-ayakkabi-x-g2-c114'
 
 def get_content(url):
     driver.get(url)
@@ -64,7 +64,7 @@ def get_pr_features(products):
             "price", "rating", "info", "comments"
         ] 
 
-    with open("dataset2.csv", "a", encoding="utf-8") as file:
+    with open("dnm.csv", "a", encoding="utf-8") as file:
         csv_writer = csv.writer(file)
         csv_writer.writerow(features)
 
@@ -128,19 +128,36 @@ def get_pr_features(products):
                     product_desc = " ".join([part.text.strip() for part in desc if part.text.strip()])
 
                 elif len(detail_items) != 0:
-                    for item in detail_items[0].find_all("li"):
-                        key = item.find("span", {"class":"attr-key-name-w"}).text.strip()
-                        value = item.find("span", {"class":"attr-value-name-w"}).text.strip()
-            
-                        pr_details[key] = value
-        
-                    product_desc = pr_details
+                    
+                    for ul in detail_items:  
+                        for item in ul.find_all("li"):  
+                            if item:  
+                                key_span = item.find("span", {"class": "attr-key-name-w"})
+                                value_span = item.find("span", {"title": True})  
+                    
+                                if key_span and value_span:
+                                    key = key_span.text.strip()
+                                    
+                                    value_div = value_span.find("div", {"class": "attr-value-name-w"})
+                                    value = value_div.text.strip() if value_div else value_span.get("title", "").strip()
+                        
+                                    if key and value:
+                                        pr_details[key] = value
+                                        
+                                    else:
+                                        print("Skipping item due to missing key or value")
+                                else:
+                                    print(f"Skipping item: key_span={key_span}, value_span={value_span}")
+                            else:
+                                print("Skipping a None item")
 
-                elif len(detail_items) == 0:
+                    product_desc = pr_details if pr_details else np.nan
+                else:
                     product_desc = np.nan
 
             except:
                 product_desc = np.nan
+
             comments_arr = []
             try:
                 if '?' in pr:
@@ -171,11 +188,9 @@ def get_pr_features(products):
 
             csv_writer.writerow(row)
             
-
-
 if __name__=="__main__":
 
-    nos = get_page_no(132, 200, URL) 
+    nos = get_page_no(101, 200, URL) 
     products , num = get_products(nos)
     get_pr_features(products)
     
