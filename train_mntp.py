@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
+from torch.utils.data import random_split
 
 from transformers import (
     AutoTokenizer,
@@ -27,8 +26,6 @@ from trainers.mntp_trainer import MNTPTrainer
 from utils.dataset import DataCollatorForLanguageModelingWithFullMasking, EmbedTurkDataset
 from utils.tokenizer import Tokenize
 
-from sklearn.preprocessing import StandardScaler
-
 import pandas as pd
 import numpy as np
 import random
@@ -38,16 +35,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = get_logger(__name__, log_level="INFO")
 
-train_ratio = 0.75
-
 dataset_path = "/content/drive/MyDrive/EmbedTurk/dataset/new_dataset.csv"
 dataset = pd.read_csv(dataset_path)
+
 max_len = 512
 stride = 2
-batch_size = 8
-shuffle = True
-drop_last = True
-num_workers = 8
+train_ratio = 0.8
 
 qlora=True
 model_name = "meta-llama/Meta-Llama-3-8B"
@@ -62,6 +55,7 @@ data_collator_type = "default"
 mlm_probability = 0.15
 line_by_line = False
 pad_to_max_length = False
+mask_token_type = "blank"
 
 def get_model_class(config):
   config_class_name = config.__class__.__name__
@@ -75,18 +69,20 @@ def get_model_class(config):
 
 def dataloader(
       tokenizer, dataset_path, max_len,
-      stride, batch_size, shuffle,
-      drop_last, num_workers, collate_fn, special_tokens=None
+      stride, train_ratio, special_tokens=None
     ):
 
-  dataset = EmbedTurkDataset(tokenizer, dataset_path, max_len, stride, special_tokens)
+  dataset = EmbedTurkDataset(tokenizer, dataset_path, max_len, stride, special_tokens, train_ratio=0.8,)
 
-  dataloader = DataLoader(
-      dataset, batch_size=batch_size, shuffle=shuffle,
-      drop_last=drop_last, num_workers=num_workers, collate_fn=collate_fn
-  )
+  generator = torch.Generator().manual_seed(42)
 
-  return dataloader
+  train_size = int(len(dataset) * train_ratio)
+  val_size = len(dataset) - train_size
+  train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+  print(f"Train Size: {train_size}, Val Size: {val_size}")
+
+  return train_dataset, val_dataset
 
 def set_seed(seed):
     random.seed(seed)
@@ -149,6 +145,20 @@ def main():
   tokenizer = AutoTokenizer.from_pretrained(model_name)
   tok = Tokenize(tokenizer, dataset)
 
+  if tokenizer.mask_token is None:
+    if mask_token_type == "blank":
+        tokenizer.mask_token = "_"
+    elif mask_token_type == "eos":
+        tokenizer.mask_token = tokenizer.eos_token
+    elif mask_token_type == "mask":
+        tokenizer.add_tokens(["<mask>"])
+        tokenizer.mask_token = "<mask>"
+    else:
+        raise ValueError
+
+  if tokenizer.pad_token is None:
+      tokenizer.pad_token = tokenizer.eos_token
+
   peft_model = init_model(
       model_name,
       r,
@@ -173,15 +183,6 @@ def main():
   	  report_to='wandb' 
   )
 
-
-  train_size = int(len(dataset) * train_ratio)
-
-  train_dataset = dataset[:train_size]
-  val_dataset = dataset[train_size:]
-
-  print("Train size: ", len(train_dataset))
-  print("Val size: ", len(val_dataset))
-
   pad_to_multiple_of_8 = (
         line_by_line
         and training_args.fp16
@@ -204,37 +205,20 @@ def main():
       pad_to_multiple_of=8 if pad_to_multiple_of_8 else None,
   )
 
-  train_loader = dataloader(
+  train_dataset, val_dataset = dataloader(
       tokenizer,
-      train_dataset,
+      dataset_path,
       max_len,
       stride,
-      batch_size,
-      shuffle,
-      drop_last,
-      num_workers,
-      data_collator,
-      special_tokens=None
-    )
-
-  val_loader = dataloader(
-      tokenizer,
-      val_dataset,
-      max_len,
-      stride,
-      batch_size,
-      shuffle,
-      drop_last,
-      num_workers,
-      data_collator,
+      train_ratio,
       special_tokens=None
     )
   
   trainer = MNTPTrainer(
         model=peft_model,
         args=training_args,
-        train_dataset=train_loader,
-        eval_dataset=val_loader,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         data_collator=data_collator,
   )
 
@@ -243,6 +227,5 @@ def main():
   peft_model.save_pretrained("./final_model")
   tok.save_vocab()
 
-
-
-
+if __name__=="__main__":
+   main()

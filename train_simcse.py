@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
+from torch.utils.data import random_split
 
 from transformers import (
     AutoTokenizer,
@@ -27,8 +26,6 @@ from utils.dataset import EmbedTurkDataset
 from utils.tokenizer import Tokenize
 from models.llama import EmbedTurkRecLlama
 
-from sklearn.preprocessing import StandardScaler
-
 import pandas as pd
 import numpy as np
 import random
@@ -38,18 +35,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = get_logger(__name__, log_level="INFO")
 
-
 dataset_path = "/content/drive/MyDrive/EmbedTurk/dataset/new_dataset.csv"
 dataset = pd.read_csv(dataset_path)
 
-train_ratio = 0.75
-
 max_len = 512
 stride = 2
-batch_size = 8
-shuffle = True
-drop_last = True
-num_workers = 8
+train_ratio = 0.8
 
 qlora=True
 model_name = "meta-llama/Meta-Llama-3-8B"
@@ -61,21 +52,22 @@ bias="none"
 task_type="CAUSAL_LM"
 
 
-
 def dataloader(
       tokenizer, dataset_path, max_len,
-      stride, batch_size, shuffle,
-      drop_last, num_workers, special_tokens=None
+      stride, train_ratio, special_tokens=None
     ):
 
-  dataset = EmbedTurkDataset(tokenizer, dataset_path, max_len, stride, special_tokens)
+  dataset = EmbedTurkDataset(tokenizer, dataset_path, max_len, stride, special_tokens, train_ratio=0.8,)
 
-  dataloader = DataLoader(
-      dataset, batch_size=batch_size, shuffle=shuffle,
-      drop_last=drop_last, num_workers=num_workers
-  )
+  generator = torch.Generator().manual_seed(42)
 
-  return dataloader
+  train_size = int(len(dataset) * train_ratio)
+  val_size = len(dataset) - train_size
+  train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+  print(f"Train Size: {train_size}, Val Size: {val_size}")
+
+  return train_dataset, val_dataset
 
 def set_seed(seed):
     random.seed(seed)
@@ -147,46 +139,22 @@ def main():
     	  report_to='wandb' 
     )
 
-
-    train_size = int(len(dataset) * train_ratio)
-
-    train_dataset = dataset[:train_size]
-    val_dataset = dataset[train_size:]
-
-    print("Train size: ", len(train_dataset))
-    print("Val size: ", len(val_dataset))
-
-    train_loader = dataloader(
-        tokenizer,
-        train_dataset,
-        max_len,
-        stride,
-        batch_size,
-        shuffle,
-        drop_last,
-        num_workers,
-        special_tokens=None
-      )
-
-    val_loader = dataloader(
-        tokenizer,
-        val_dataset,
-        max_len,
-        stride,
-        batch_size,
-        shuffle,
-        drop_last,
-        num_workers,
-        special_tokens=None
-      )
+    train_dataset, val_dataset = dataloader(
+      tokenizer,
+      dataset_path,
+      max_len,
+      stride,
+      train_ratio,
+      special_tokens=None
+    )
 
     loss_fn = HardNegativeNLLLoss()
 
     trainer = SimCSETrainer(
         model=peft_model,
         args=training_args,
-        train_dataset=train_loader,
-        eval_dataset=val_loader,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         loss_fn=loss_fn
       )
 
