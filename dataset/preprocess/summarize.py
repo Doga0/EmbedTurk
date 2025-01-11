@@ -1,11 +1,8 @@
 import torch
 import pandas as pd
 import re
-from huggingface_hub import login
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
-login(token="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")
 
 class ProcessDataset:
   def __init__(self, df, temperature, top_p, model_id="meta-llama/Meta-Llama-3-8B-Instruct"):
