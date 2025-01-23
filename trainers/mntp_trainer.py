@@ -1,8 +1,8 @@
-from transformers import Trainer, DataCollatorForLanguageModeling
 import torch
 import os
-from typing import Any, Optional, Tuple
+from typing import Optional
 from accelerate.logging import get_logger
+from transformers import Trainer
 import datasets
 
 logger = get_logger(__name__, log_level="INFO")

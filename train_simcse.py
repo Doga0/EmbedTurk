@@ -1,73 +1,42 @@
 import torch
-import torch.nn as nn
-from torch.utils.data import random_split
 
 from transformers import (
-    AutoTokenizer,
-    AutoModel,
-    AutoConfig,
-    LlamaPreTrainedModel,
     TrainingArguments,
-    Trainer,
-    BitsAndBytesConfig,
-    HfArgumentParser,
-    LlamaConfig,
   )
-import datasets
+from datasets import load_dataset
 from accelerate.logging import get_logger
-
-from llm2vec.models.bidirectional_llama import LlamaBiModel
 
 from peft import LoraConfig, get_peft_model
 
 from trainers.simcse_trainer import SimCSETrainer
 from loss.HardNegativeNLLLoss import HardNegativeNLLLoss
-from utils.dataset import EmbedTurkDataset
-from utils.tokenizer import Tokenize
-from models.llama import EmbedTurkRecLlama
+from utils.dataset import SimCSEDatasetFromHF
+from llm2vec.llm2vec import LLM2Vec
 
-import pandas as pd
 import numpy as np
 import random
-import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 logger = get_logger(__name__, log_level="INFO")
 
-dataset_path = "/content/drive/MyDrive/EmbedTurk/dataset/new_dataset.csv"
-dataset = pd.read_csv(dataset_path)
-
 max_len = 512
-stride = 2
-train_ratio = 0.8
+test_ratio = 0.1
 
-qlora=True
-model_name = "meta-llama/Meta-Llama-3-8B"
+model_name = "DogaOytc/llama3-mntp-dnm2"
 r = 8
 lora_alpha = 32
-target_modules=["q_proj", "v_proj"]
+target_modules=["q_proj", "k_proj","v_proj"]
 lora_dropout = 0.01
 bias="none"
 task_type="CAUSAL_LM"
 
+pooling_mode = "mean"
+simcse_dropout = 0.3
+size = 4000
 
-def dataloader(
-      tokenizer, dataset_path, max_len,
-      stride, train_ratio, special_tokens=None
-    ):
+loss_scale = 20
 
-  dataset = EmbedTurkDataset(tokenizer, dataset_path, max_len, stride, special_tokens, train_ratio=0.8,)
-
-  generator = torch.Generator().manual_seed(42)
-
-  train_size = int(len(dataset) * train_ratio)
-  val_size = len(dataset) - train_size
-  train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
-
-  print(f"Train Size: {train_size}, Val Size: {val_size}")
-
-  return train_dataset, val_dataset
 
 def set_seed(seed):
     random.seed(seed)
@@ -75,93 +44,81 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def init_model(model_name, 
-               r, 
-               lora_alpha, 
-               lora_dropout, 
-               qlora=True, 
-               target_modules=["q_proj", "v_proj"], 
-               bias="none", 
-               task_type="CAUSAL_LM"
-    ):
+def main():
+  set_seed(1234)
 
-  config = LlamaConfig.from_pretrained(model_name)
-  base_model = EmbedTurkRecLlama(model_name, config, qlora)
+  model = LLM2Vec.from_pretrained(
+          model_name,
+          enable_bidirectional=True,
+          pooling_mode=pooling_mode,
+          torch_dtype=torch.bfloat16,
+          attn_implementation="eager",
+          attention_dropout=simcse_dropout,
+      )
 
   lora_config = LoraConfig(
-      r,
-      lora_alpha,
-      target_modules,
-      lora_dropout,
-      bias,
-      task_type
+    r=r,
+    lora_alpha=lora_alpha,
+    target_modules=target_modules,
+    lora_dropout=lora_dropout,
+    bias=bias,
+    task_type=task_type
   )
-
-  peft_model = get_peft_model(base_model, lora_config)
+  peft_model = model.model
+  peft_model = get_peft_model(peft_model, lora_config)
 
   print("Trainable Parameters: ")
   peft_model.print_trainable_parameters()
 
-  return peft_model
+  tokenizer = model.tokenizer
 
-def main():
-    set_seed(1234)
+  # Load dataset
+  raw_datasets = load_dataset("parsak/msmarco-tr", "passages", split="train")
+  del_cols = ['pid']
+  raw_datasets = raw_datasets.remove_columns(del_cols)
+  np.random.seed(42)
+  random_indices = np.random.choice(len(raw_datasets), size=size, replace=False)
+  train_dataset = raw_datasets.select(random_indices)
+  train_dataset = SimCSEDatasetFromHF(train_dataset, tokenizer)
 
-    ''' parser = HfArgumentParser(
-            (ModelArguments, TrainingArguments, CustomArguments)
-        )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses() '''
+  def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tok = Tokenize(tokenizer, dataset)
+    keys = batch[0].keys()
+    collated_batch = {key: torch.stack([example[key] for example in batch]) for key in keys}
 
-    peft_model = init_model(
-        model_name,
-        r,
-        lora_alpha,
-        lora_dropout,
-        qlora,
-        target_modules,
-        bias,
-        task_type
-      )
+    return collated_batch
 
-    training_args = TrainingArguments(
-        output_dir='./results',
-        overwrite_output_dir=True,
-        num_train_epochs=3,
-        per_device_train_batch_size=1,
-        save_steps=10000,
-        save_total_limit=2,
-        fp16=True, 
-        deepspeed="/content/drive/MyDrive/EmbedTurk/dataset/ds_cfg/deepspeed.config",        
-        gradient_checkpointing=True,
-    	  report_to='wandb' 
-    )
+  # Define loss function
+  def load_loss(loss_scale):
+    loss_class = HardNegativeNLLLoss
+    return loss_class(scale=loss_scale)
 
-    train_dataset, val_dataset = dataloader(
-      tokenizer,
-      dataset_path,
-      max_len,
-      stride,
-      train_ratio,
-      special_tokens=None
-    )
+  loss_fn = load_loss(loss_scale)
 
-    loss_fn = HardNegativeNLLLoss()
+  training_args = TrainingArguments(
+    output_dir='/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp-simcse/results',
+    overwrite_output_dir=True,
+    num_train_epochs=2,
+    per_device_train_batch_size=2,
+    save_steps=1000,
+    fp16=True,
+    deepspeed="/content/drive/MyDrive/EmbedTurk/dataset/ds_cfg/ds_config.config",
+    report_to='wandb',
+    logging_dir='/content/drive/MyDrive/EmbedTurk/logs',
+    logging_steps=100,
+  )
 
-    trainer = SimCSETrainer(
-        model=peft_model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        loss_fn=loss_fn
-      )
+  # Initialize trainer
+  trainer = SimCSETrainer(
+      model=peft_model,
+      args=training_args,
+      train_dataset=train_dataset,
+      data_collator=collate_fn,
+      loss_function=loss_fn
+  )
 
-    trainer.train()
-
-    peft_model.save_pretrained("./final_model")
-    tok.save_vocab()
+  # Train model
+  trainer.train()
 
 if __name__=="__main__":
   main()

@@ -1,35 +1,23 @@
 import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
 
 from transformers import (
     AutoTokenizer,
-    AutoModel,
     AutoConfig,
-    LlamaPreTrainedModel,
     TrainingArguments,
-    Trainer,
     BitsAndBytesConfig,
-    HfArgumentParser,
-    LlamaConfig,
     DataCollatorForLanguageModeling
   )
-import datasets
 from datasets import load_dataset
 from accelerate.logging import get_logger
 import evaluate
 
-from llm2vec.models.bidirectional_llama import LlamaBiForMNTP
-from llm2vec.models.bidirectional_mistral import MistralBiForMNTP
+from models.llama import LlamaBiForMNTP
 
 from peft import LoraConfig, get_peft_model
 
-import pandas as pd
 import numpy as np
 
 import random
-import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 from itertools import chain
 
@@ -41,12 +29,11 @@ logger = get_logger(__name__, log_level="INFO")
 dataset_path = "musabg/wikipedia-tr"
 
 qlora = False
-# model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
 model_name = "unsloth/llama-3-8b-Instruct"
 
 r = 8
 lora_alpha = 32
-target_modules=["q_proj", "k_proj" "v_proj"]
+target_modules=["q_proj", "v_proj"]
 lora_dropout = 0.01
 bias="none"
 task_type="CAUSAL_LM"
@@ -68,8 +55,6 @@ def get_model_class(config):
 
   if config_class_name == "LlamaConfig":
     return LlamaBiForMNTP
-  elif config_class_name == "MistralConfig":
-    return MistralBiForMNTP
   else:
     raise ValueError()
 
@@ -189,7 +174,6 @@ def main():
       save_total_limit=2,
       fp16=True,
       deepspeed="/content/drive/MyDrive/EmbedTurk/dataset/ds_cfg/ds_config.config",
-      #gradient_checkpointing=True, #produces RuntimeError when used with deepspeed
   	  report_to='wandb',
       evaluation_strategy="steps",
       eval_steps=500,
@@ -315,8 +299,8 @@ def main():
 
   trainer.train()
 
-  peft_model.save_pretrained("/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp/final_model")
-  tokenizer.save_pretrained("/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp/vocab/tokenizer/")
+  # peft_model.save_pretrained("/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp/final_model")
+  # tokenizer.save_pretrained("/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp/vocab/tokenizer/")
 
 if __name__=="__main__":
   main()
