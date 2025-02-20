@@ -1,2 +1,2 @@
-# EmbedTurk-Rec
-EmbedTurk-Rec
+# EmbedTurk
+EmbedTurk
