@@ -25,6 +25,22 @@ class SimCSEDatasetFromHF(Dataset):
 
     def __len__(self) -> int:
         return len(self.data)
+    
+class SupSimCSEDatasetFromHF(Dataset):
+    def __init__(self, data, tokenizer, max_length=512):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        return {
+            "anchor": self.data[index]["anchor"],
+            "positive": self.data[index]["positive"],
+            "negative": self.data[index]["negative"]
+        }
+
+    def __len__(self) -> int:
+        return len(self.data)
   
 class DataCollatorForLanguageModelingWithFullMasking(DataCollatorForLanguageModeling):
     def torch_mask_tokens(
