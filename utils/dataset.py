@@ -1,67 +1,30 @@
 import torch
-from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset
 from typing import Any, Optional, Tuple
 from transformers import DataCollatorForLanguageModeling
+from typing import Dict
 
-class EmbedTurkDataset(Dataset):
-  def __init__(self, tokenizer, dataset, max_len, stride, special_tokens=None):
-    self.tokenizer = tokenizer
-    self.dataset = dataset
-    self.max_len = max_len
-    self.stride = stride
+class SimCSEDatasetFromHF(Dataset):
+    def __init__(self, data, tokenizer, max_length=512):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-    self.special_tokens = ["<|endoftext|>"] if special_tokens is None else special_tokens
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        example = self.data[index]
 
-    scaler = StandardScaler()
-    num_cols = self.dataset.select_dtypes(include='number').columns
-    self.dataset[num_cols] = scaler.fit_transform(self.dataset[num_cols])
+        tokenized = self.tokenizer(
+            example["text"],
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
 
-    self.text_cols = self.dataset.select_dtypes(include=['object', 'string']).columns
-    for col in self.text_cols:
-      self.dataset[col] = self.dataset[col].apply(
-                    lambda x: self._tokenize_text(str(x))
-      )
+        return {key: val.squeeze(0).long() for key, val in tokenized.items()}
 
-  def _tokenize_text(self, text):
-
-    encoded = self.tokenizer.encode(
-        text,
-        max_length=self.max_len,
-        padding='max_length',
-        truncation=True,
-        return_tensors='pt',
-        add_special_tokens=True,
-        return_attention_mask=True
-    )
-    return {
-      'input_ids': encoded['input_ids'].squeeze(0),
-      'attn_mask': encoded['attn_mask'].squeeze(0)
-    }
-
-  def __getitem__(self, idx):
-    row = self.dataset.iloc[idx]
-
-    numeric_data = torch.tensor(row[self.num_cols].values, dtype=torch.float32) if not self.num_cols.empty else torch.tensor([])
-
-    text_ids = []
-    attn_masks = []
-    for col in self.text_cols:
-      tokenied = row[col]
-      text_ids.append(tokenied["input_ids"])
-      attn_masks.append(tokenied["attn_masks"])
-
-    text_ids = torch.stack(text_ids)
-    attn_masks = torch.stack(attn_masks)
-
-    return {
-        'numeric': numeric_data,
-        'text': text_ids,
-        'attn_mask': attn_masks
-    }
-
-  def __len__(self):
-    return len(self.dataset)
+    def __len__(self) -> int:
+        return len(self.data)
   
 class DataCollatorForLanguageModelingWithFullMasking(DataCollatorForLanguageModeling):
     def torch_mask_tokens(
