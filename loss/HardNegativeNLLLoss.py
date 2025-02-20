@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn, Tensor
+from torch import nn, Tensor
 
 def cos_sim(a: Tensor, b: Tensor):
     """
