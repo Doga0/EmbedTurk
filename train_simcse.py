@@ -11,7 +11,7 @@ from peft import LoraConfig, get_peft_model
 from trainers.simcse_trainer import SimCSETrainer
 from loss.HardNegativeNLLLoss import HardNegativeNLLLoss
 from utils.dataset import SimCSEDatasetFromHF
-from llm2vec.llm2vec import LLM2Vec
+from models.llm2vec.llm2vec import LLM2Vec
 
 import numpy as np
 import random
@@ -24,7 +24,7 @@ max_len = 512
 test_ratio = 0.1
 
 model_name = "DogaOytc/llama3-mntp-dnm2"
-r = 8
+r = 16
 lora_alpha = 32
 target_modules=["q_proj", "k_proj","v_proj"]
 lora_dropout = 0.01
@@ -32,7 +32,6 @@ bias="none"
 task_type="CAUSAL_LM"
 
 pooling_mode = "mean"
-simcse_dropout = 0.3
 size = 4000
 
 loss_scale = 20
@@ -53,7 +52,6 @@ def main():
           pooling_mode=pooling_mode,
           torch_dtype=torch.bfloat16,
           attn_implementation="eager",
-          attention_dropout=simcse_dropout,
       )
 
   lora_config = LoraConfig(
