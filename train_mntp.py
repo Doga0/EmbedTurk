@@ -12,6 +12,8 @@ from accelerate.logging import get_logger
 import evaluate
 
 from models.llama import LlamaBiForMNTP
+from models.qwen import Qwen2BiModel
+from models.gemma import GemmaBiModel
 
 from peft import LoraConfig, get_peft_model
 
@@ -28,12 +30,12 @@ logger = get_logger(__name__, log_level="INFO")
 
 dataset_path = "musabg/wikipedia-tr"
 
-qlora = False
 model_name = "unsloth/llama-3-8b-Instruct"
 
-r = 8
+r = 16
 lora_alpha = 32
-target_modules=["q_proj", "v_proj"]
+target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",]
 lora_dropout = 0.01
 bias="none"
 task_type="CAUSAL_LM"
@@ -55,6 +57,10 @@ def get_model_class(config):
 
   if config_class_name == "LlamaConfig":
     return LlamaBiForMNTP
+  elif config_class_name == "Qwen2Config":
+    return Qwen2BiModel
+  elif config_class_name == "GemmaConfig":
+    return GemmaBiModel 
   else:
     raise ValueError()
 
@@ -63,11 +69,8 @@ def dataloader(dataset, test_ratio=0.1):
   test_size = int(len(dataset) * test_ratio)
   train_size = len(dataset) - test_size
 
-  np.random.seed(42)
-  indices = np.random.permutation(len(dataset))
-
-  train_indices = indices[:train_size]
-  val_indices = indices[train_size:]
+  train_indices = np.arange(0, train_size)
+  val_indices = np.arange(train_size, len(dataset))
 
   train_dataset = dataset.select(train_indices)
   val_dataset = dataset.select(val_indices)
@@ -86,7 +89,6 @@ def init_model(model_name,
                r,
                lora_alpha,
                lora_dropout,
-               qlora,
                target_modules=["q_proj", "k_proj", "v_proj"],
                bias="none",
                task_type="CAUSAL_LM"
@@ -96,17 +98,21 @@ def init_model(model_name,
 
   model_class = get_model_class(config)
 
-  #error while using qlora with deepspeed
-  if qlora:
-    bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+  bnb_config = BitsAndBytesConfig(load_in_4bit=True)
 
   base_model = model_class.from_pretrained(
       model_name,
       device_map="auto",
       torch_dtype=torch.bfloat16,
-      attn_implementation="sdpa",
+      attn_implementation="eager",
       output_hidden_states=True,
-      quantization_config = bnb_config if qlora else None
+      quantization_config = bnb_config
+  )
+
+  tokenizer = AutoTokenizer.from_pretrained(
+      model_name,
+      padding_side="right",
+      use_fast=True
   )
 
   lora_config = LoraConfig(
@@ -123,7 +129,7 @@ def init_model(model_name,
   print("Trainable Parameters: ")
   peft_model.print_trainable_parameters()
 
-  return peft_model
+  return peft_model, tokenizer
 
 def main():
 
@@ -134,11 +140,15 @@ def main():
       )
   model_args, data_args, training_args = parser.parse_args_into_dataclasses() '''
 
-  tokenizer = AutoTokenizer.from_pretrained(
+  peft_model, tokenizer = init_model(
       model_name,
-      padding_side="right",
-      use_fast=True
-  )
+      r,
+      lora_alpha,
+      lora_dropout,
+      target_modules,
+      bias,
+      task_type
+    )
 
   if tokenizer.mask_token is None:
     if mask_token_type == "blank":
@@ -153,17 +163,6 @@ def main():
 
   if tokenizer.pad_token is None:
       tokenizer.pad_token = tokenizer.eos_token
-
-  peft_model = init_model(
-      model_name,
-      r,
-      lora_alpha,
-      lora_dropout,
-      qlora,
-      target_modules,
-      bias,
-      task_type
-    )
 
   training_args = TrainingArguments(
       output_dir='/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp/results',
@@ -227,7 +226,8 @@ def main():
   tokenized_datasets = subset_dataset.map(
       tokenize_function,
       batched=True,
-      remove_columns=['text']
+      remove_columns=['text'],
+      num_proc=torch.cuda.device_count(),
   )
 
   def group_texts(examples):
@@ -252,6 +252,7 @@ def main():
   tokenized_datasets = tokenized_datasets.map(
       group_texts,
       batched=True,
+      num_proc=torch.cuda.device_count(),
   )
 
   train_dataset, val_dataset = dataloader(tokenized_datasets, test_ratio=test_ratio)
