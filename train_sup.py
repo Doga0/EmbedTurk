@@ -1,4 +1,6 @@
 import torch
+from torch.utils.data import DataLoader, SequentialSampler
+import torch.nn as nn
 
 from transformers import (
     TrainingArguments,
@@ -7,10 +9,13 @@ from transformers import (
     LlamaConfig,
     GemmaConfig,
     Qwen2Config,
+    BitsAndBytesConfig,
+    Trainer
   )
 
 from datasets import load_dataset
 from accelerate.logging import get_logger
+from accelerate import Accelerator
 
 from peft import LoraConfig, get_peft_model
 
@@ -18,9 +23,7 @@ import numpy as np
 import random
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from trainers.sup_trainer import SupSimCSETrainer
 from loss.HardNegativeNLLLoss import HardNegativeNLLLoss
-from utils.dataset import SupSimCSEDatasetFromHF
 from models.llm2vec.llm2vec import LLM2Vec
 
 
@@ -32,15 +35,20 @@ test_ratio = 0.1
 model_name = "DogaOytc/llama3-mntp-dnm2"
 r = 16
 lora_alpha = 32
-target_modules=["q_proj", "k_proj","v_proj"]
+target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 lora_dropout = 0.01
-bias="none"
-task_type="CAUSAL_LM"
 
 pooling_mode = "mean"
-size = 4000
+size = 400000
 
 loss_scale = 20
+
+### PATHS ####
+output_dir = '/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp-simcse/results'
+cfg_dir = "/content/drive/MyDrive/EmbedTurk/config/ds_config.config"
+log_dir = '/content/drive/MyDrive/EmbedTurk//llama3-Instruct-mntp-simcse/logs'
+final_model_dir = "/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp-simcse/final_model"
+tokenizer_dir = "/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp-simcse/vocab/tokenizer"
 
 def set_seed(seed):
     random.seed(seed)
@@ -85,12 +93,16 @@ def main():
 
   device = "cuda" if torch.cuda.is_available() else "cpu"
 
+  bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+
   model = LLM2Vec.from_pretrained(
           model_name,
           enable_bidirectional=True,
           pooling_mode=pooling_mode,
           torch_dtype=torch.bfloat16,
-          attn_implementation="eager",
+          quantization_config = bnb_config,
+          max_length=max_len,
+          attn_implementation="eager"
       )
 
   lora_config = LoraConfig(
@@ -98,9 +110,10 @@ def main():
     lora_alpha=lora_alpha,
     target_modules=target_modules,
     lora_dropout=lora_dropout,
-    bias=bias,
-    task_type=task_type
+    bias="none",
+    task_type=None
   )
+
   peft_model = model.model
   peft_model = get_peft_model(peft_model, lora_config)
 
@@ -108,7 +121,6 @@ def main():
   peft_model.print_trainable_parameters()
 
   tokenizer = model.tokenizer
-  tokenizer.to(device)
 
 
   def collate_fn(batch):
@@ -136,18 +148,17 @@ def main():
     negatives = [
       prepare_for_tokenization(
           model, 
-          neg, 
+          item["negative"], 
           pooling_mode=model.pooling_mode
       )
       for item in batch
-      for neg in item["negative"]
     ]    
 
     result = []
 
-    anchor_inputs = tokenizer(anchor, max_length=max_len, return_attention_mask=True, padding=True, truncation=True, return_tensors='pt')
-    positive_inputs = tokenizer(positives, max_length=max_len, return_attention_mask=True, padding=True, truncation=True, return_tensors='pt')
-    negative_inputs = tokenizer(negatives, max_length=max_len, return_attention_mask=True, padding=True, truncation=True, return_tensors='pt')
+    anchor_inputs = tokenizer(anchor, max_length=max_len, return_attention_mask=True, padding='max_length', truncation=True, return_tensors='pt')
+    positive_inputs = tokenizer(positives, max_length=max_len, return_attention_mask=True, padding='max_length', truncation=True, return_tensors='pt')
+    negative_inputs = tokenizer(negatives, max_length=max_len, return_attention_mask=True, padding='max_length', truncation=True, return_tensors='pt')
 
     result.append(anchor_inputs)
     result.append(positive_inputs)
@@ -161,38 +172,92 @@ def main():
   np.random.seed(42)
   random_indices = np.random.choice(len(raw_datasets), size=size, replace=False)
   train_dataset = raw_datasets.select(random_indices)
-  train_dataset = SupSimCSEDatasetFromHF(train_dataset, tokenizer)
+
+  kwargs = []
+  accelerator = Accelerator(kwargs_handlers=kwargs)
+
+
+  class SupervisedTrainer(Trainer):
+        def __init__(
+            self,
+            *args,
+            collate_fn,
+            loss_function=None,
+            **kwargs,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self.loss_function = loss_function
+            self.collate_fn = collate_fn
+            self.train_dataloader = DataLoader(
+                train_dataset,
+                collate_fn=self.collate_fn,
+                shuffle=True,
+                batch_size=self._train_batch_size,
+                pin_memory=True,
+            )
+
+        def get_train_dataloader(self):
+
+            return self.accelerator.prepare(self.train_dataloader)
+
+        def compute_loss(
+            self,
+            model: nn.Module,
+            inputs: Dict[str, Union[torch.Tensor, Any]],
+            **kwargs
+        ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+            features, labels = inputs
+
+            q_reps = self.model(**features[0]).last_hidden_state
+            d_reps = self.model(**features[1]).last_hidden_state
+            d_reps_neg = self.model(**features[2]).last_hidden_state
+
+            loss = self.loss_function(q_reps, d_reps, d_reps_neg)
+            return loss
 
 
   def load_loss(loss_scale):
     loss_class = HardNegativeNLLLoss
     return loss_class(scale=loss_scale)
 
-
   loss_fn = load_loss(loss_scale)
 
   training_args = TrainingArguments(
-    output_dir='/content/drive/MyDrive/EmbedTurk/llama3-Instruct-mntp-simcse/results',
+    output_dir=output_dir,
     overwrite_output_dir=True,
-    num_train_epochs=2,
-    per_device_train_batch_size=2,
-    save_steps=1000, 
+    num_train_epochs=1,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=2,
+    save_total_limit=2,
+    save_steps=5000,
     fp16=True,
-    deepspeed="/content/drive/MyDrive/EmbedTurk/dataset/ds_cfg/ds_config.config",
-    report_to='wandb',
-    logging_dir='/content/drive/MyDrive/EmbedTurk/logs',
+    deepspeed=cfg_dir,
+    report_to='tensorboard',
+    logging_dir=log_dir,
     logging_steps=100,
   )
 
-  trainer = SupSimCSETrainer(
-      model=peft_model,
-      args=training_args,
-      train_dataset=train_dataset,
-      data_collator=collate_fn,
-      loss_function=loss_fn
-  )
+  if training_args.gradient_checkpointing:
+    training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+
+  trainer = SupervisedTrainer(
+        model=peft_model,
+        args=training_args,
+        tokenizer=tokenizer,
+        collate_fn=collate_fn,
+        loss_function=loss_fn,
+    )
+
+  gpu_stats = torch.cuda.get_device_properties(0)
+  start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
+  max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
+  print(f"\nGPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
+  print(f"{start_gpu_memory} GB of memory reserved.\n")
 
   trainer.train()
+
+  peft_model.save_pretrained(final_model_dir)
+  tokenizer.save_pretrained(tokenizer_dir)
 
 if __name__=="__main__":
   main()
